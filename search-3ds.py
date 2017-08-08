@@ -22,8 +22,8 @@ parser.add_argument('--path', metavar='DIR', help='path to search, defaults to c
 
 terms = parser.add_argument_group('terms')
 terms.add_argument('--type', '-t', metavar='NAME', help='file types to search, separated by commas')
-terms.add_argument('--name', '-n', metavar='NAME', help='title name (in smdh, displays on HOME Menu) - entire name not required')
-terms.add_argument('--strict-name', '-N', metavar='NAME', help='case-sensitive title name (in smdh, displays on HOME Menu) - entire name not required')
+terms.add_argument('--name', '-n', metavar='NAME', help='title name (in smdh, displays on HOME Menu) - entire name not required (NYI)')
+terms.add_argument('--strict-name', '-N', metavar='NAME', help='case-sensitive title name (in smdh, displays on HOME Menu) - entire name not required (NYI)')
 terms.add_argument('--title-id', '-i', metavar='TID', help='title id (e.g. 0004000000046500)')
 terms.add_argument('--product-code', '-p', metavar='CODE', help='product code (e.g. CTR-P-AQNE) - entire product code not required')
 
@@ -254,8 +254,6 @@ lines = []
 def add_to_table(line):
     global column_lengths, lines
     for idx, col in enumerate(line):
-        print(idx)
-        print(col)
         column_lengths[idx] = max(len(col), column_lengths[idx])
     lines.append(line)
 
