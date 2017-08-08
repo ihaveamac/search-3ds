@@ -3,7 +3,7 @@ Searches contents in files used on the Nintendo 3DS system.
 
 ## Usage
 ```bash
-python3 search-3ds.py [-h] [--path=dir] {search-terms}
+python3 search-3ds.py [-h] [--path DIR] {search-terms}
 ```
 
 ### Search terms

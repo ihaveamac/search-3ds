@@ -7,8 +7,16 @@ from collections import OrderedDict
 from glob import glob
 from os.path import join as pjoin  # this feels dirty
 
+encryption_supported = False
+try:
+    from Cryptodome.Cipher import AES
+    from Cryptodome.Util import Counter
+    encryption_supported = True
+except ImportError:
+    print('Crypto module not found, please install pycryptodomex for encryption support.')
+
 parser = argparse.ArgumentParser(description='Searches contents in files used on the Nintendo 3DS system.')
-parser.add_argument('--path', metavar='PATH', help='path to search, defaults to current directory', default='.')
+parser.add_argument('--path', metavar='DIR', help='path to search, defaults to current directory', default='.')
 # parser.add_argument('--no-format', metavar='PATH', help='don\'t format results like a table (NYI)', default='.')
 
 terms = parser.add_argument_group('terms')
@@ -78,9 +86,22 @@ def check_ticket(tik, content, cktype):
         return tik[0x1DC:0x1E4] == bytes.fromhex(content)
 
 
+# types: 'tid', ...
+# checks starting at 0x100 (ignoring signature)
+def check_ncch(ncch, content, cktype):
+    if cktype == 'tid':
+        return ncch[0x8:0x10][::-1] == bytes.fromhex(content)
+
+
+# types: 'tid', ...
+# checks starting at 0x100 (ignoring signature)
+def check_ncsd(ncsd, content, cktype):
+    if cktype == 'tid':
+        return ncsd[0x8:0x10][::-1] == bytes.fromhex(content)
+
+
 search_results = OrderedDict()
-# for use when displaying a table
-longest_name_len = 8
+longest_name_len = 8  # for use when displaying a table
 
 for filename in big_list_of_files:
     with open(filename, 'rb') as f:
@@ -93,13 +114,13 @@ for filename in big_list_of_files:
         #   ticket size never change
         cia_header = struct.pack('<IHHII', 0x2020, 0, 0, 0xA00, 0x350)
         if f.read(0x10) == cia_header:
-            result['type'] = 'CIA '
             matches = 'cia' in types
             if not matches:
                 break
+            result['type'] = 'CIA '
+
             # since the sizes of everything before the tmd are fixed, we just
             #   need the tmd size to reach the content.
-
             tmd_size = int.from_bytes(f.read(4), 'little')
             content_offset = 0x2DC0 + roundup(tmd_size)
 
@@ -112,13 +133,40 @@ for filename in big_list_of_files:
                 else:
                     continue
         else:
-            continue  # working on
             f.seek(0x100)
             magic = f.read(4)
-            if magic == b'NCSD':
-                pass
-            elif magic == b'NCCH':
-                pass
+            if magic == b'NCCH':
+                matches = 'ncch' in types
+                if not matches:
+                    break
+                result['type'] = 'NCCH'
+
+                if a.title_id:
+                    # read tid from ncch header
+                    f.seek(0x100)
+                    matches = check_ncch(f.read(0x100), a.title_id, 'tid')
+                    if matches:
+                        result['tid'] = a.title_id.lower()
+                    else:
+                        continue
+            elif magic == b'NCSD':
+                matches = 'cci' in types
+                if not matches:
+                    break
+                # special check to make sure it's not a nand backup
+                f.seek(0x10C)
+                if f.read(4) != b'\0\0\4\0':
+                    continue
+                result['type'] = 'CCI '
+
+                if a.title_id:
+                    # read tid from ncsd header
+                    f.seek(0x100)
+                    matches = check_ncch(f.read(0x100), a.title_id, 'tid')
+                    if matches:
+                        result['tid'] = a.title_id.lower()
+                    else:
+                        continue
 
         # if still matches (mostly a failsafe), add it to the search results
         if matches:
@@ -131,6 +179,7 @@ if search_results:
         header.append('Title ID        ')
     header_print = ' | '.join(header)
     print(header_print)
+
     for filename, result in search_results.items():
         line = [filename + ' ' * (longest_name_len - len(filename)), result['type']]
         if 'tid' in result:
