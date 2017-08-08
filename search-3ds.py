@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
 import struct
 import sys
 from collections import OrderedDict
@@ -34,46 +35,72 @@ if not (a.type or a.name or a.strict_name or a.title_id or a.product_code):
     parser.print_usage()
     sys.exit(1)
 
+keys_set = False
+# 0: retail, 1: dev
+orig_ncch_key_x = []
+common_key_x = []
+if encryption_supported:
+    def set_keys(boot9_file):
+        global keys_set, orig_ncch_key_x, common_key_x
+        if not keys_set and os.path.isfile(boot9_file):
+            keys_offset = 0
+            if os.path.getsize(boot9_file) == 0x10000:
+                keys_offset += 0x8000
+            for i in range(2):
+                with open(boot9_file, 'rb') as f:
+                    f.seek(0x59D0 + (i * 0x400) + keys_offset)
+                    orig_ncch_key_x.append(f.read(0x10))
+                    f.seek(0x50, 1)
+                    common_key_x.append(f.read(0x10))
+            keys_set = True
+
+    set_keys(os.path.expanduser('~') + '/.3ds/boot9.bin')
+    set_keys(os.path.expanduser('~') + '/.3ds/boot9_prot.bin')
+
 big_list_of_files = []
 
 
 def addtolist(*ext):
     for e in ext:
         # to avoid duplicates, which are possible when looking for *.*
-        for f in glob(pjoin(a.path, '**/*.' + e), recursive=True):
+        for f in glob(pjoin(a.path, '**/*' + e), recursive=True):
             if f not in big_list_of_files:
                 big_list_of_files.append(f)
 
 
-if a.type:
+if a.type and a.type != 'all':
     types = a.type.lower().split(',')
 
     # .bin is a common extension that may contain different formats
-    addtolist('bin')
+    addtolist('.bin')
 
     # assuming file extensions for file types. saves time searching files that
     #   likely don't contain the file type (cci wouldn't be a cia, etc)
     if 'cia' in types:
-        addtolist('cia')
+        addtolist('.cia')
     if 'cci' in types or '3ds' in types:
-        addtolist('cci', '3ds')
+        addtolist('.cci', '3ds')
     if 'ncch' in types:
-        addtolist('ncch', 'cxi', 'cfa', 'app', '*.*')
+        addtolist('.ncch', '.cxi', '.cfa', '.app', '*.*.*')
         # last option is to follow the format <name>.<index>.<id> that ctrtool
         #   saves cia contents as
     if 'tik' in types or 'ticket' in types:
-        addtolist('tik')
+        addtolist('.tik')
     if 'tmd' in types:
-        addtolist('tmd')
+        addtolist('.tmd')
     # if 'exefs' in types:
     #     # exefs is also commonly with a .bin filename; some tools use .exefs
     #     #   like GodMode9
-    #     addtolist('exefs')
+    #     addtolist('.exefs')
 else:
     # this doesn't feel right
-    types = ['cia', 'cci', '3ds', 'ncch', 'app', 'tik', 'tmd']  # , 'exefs']
+    types = 'all'
     # last ones are not separate types, just filename formats/extensions
-    addtolist(*types, 'bin', 'app', '*.*')
+    addtolist('.cia', '.cci', '.3ds', '.ncch', '.cxi', '.cfa', '.tik', '.tmd', '.exefs', '.bin', '.app', '*.*.*')
+
+
+def check_type(ftype):
+    return types == 'all' or ftype in types
 
 
 # based on http://stackoverflow.com/questions/1766535/bit-hack-round-off-to-multiple-of-8/1766566#1766566
@@ -118,14 +145,12 @@ def check_ncsd(ncsd, content, cktype):
 
 
 search_results = OrderedDict()
-# for use when displaying a table
-longest_name_len = 8
-longest_pcode_len = 12
 
 for filename in big_list_of_files:
     with open(filename, 'rb') as f:
         matches = False
         result = {}
+        dev = 0  # to use proper keys
 
         # determine the real file type
 
@@ -133,10 +158,10 @@ for filename in big_list_of_files:
         #   ticket size never change
         cia_header = struct.pack('<IHHII', 0x2020, 0, 0, 0xA00, 0x350)
         if f.read(0x10) == cia_header:
-            matches = 'cia' in types
+            matches = check_type('cia')
             if not matches:
                 break
-            result['type'] = 'CIA '
+            result['type'] = 'CIA'
 
             # since the sizes of everything before the tmd are fixed, we just
             #   need the tmd size to reach the content.
@@ -152,6 +177,10 @@ for filename in big_list_of_files:
                 else:
                     continue
 
+            # if encryption_supported:
+            #     f.seek()
+            #     cipher_content0 = AES.new()
+
             if a.product_code:
                 # TODO: this (product-code in cia)
                 continue
@@ -161,7 +190,7 @@ for filename in big_list_of_files:
             f.seek(0x100)
             file_header = f.read(0x100)
             if file_header[0:4] == b'NCCH':
-                matches = 'ncch' in types
+                matches = check_type('ncch')
                 if not matches:
                     break
                 result['type'] = 'NCCH'
@@ -171,7 +200,6 @@ for filename in big_list_of_files:
                     if res:
                         result['tid'] = res
                         matches = True
-                        longest_pcode_len = max(len(res), longest_pcode_len)
                     else:
                         continue
 
@@ -184,13 +212,13 @@ for filename in big_list_of_files:
                         continue
 
             elif file_header[0:4] == b'NCSD':
-                matches = 'cci' in types
+                matches = check_type('cci')
                 if not matches:
                     break
                 # special check to make sure it's not a nand backup
                 if file_header[0xC:0x10] != b'\0\0\4\0':
                     continue
-                result['type'] = 'CCI '
+                result['type'] = 'CCI'
 
                 # the ncch offset is assumed to be 0x4000 since every cci ever
                 #   has it start here. i'm also being lazy. maybe i'll
@@ -212,30 +240,45 @@ for filename in big_list_of_files:
                     if res:
                         result['pcode'] = res
                         matches = True
-                        longest_pcode_len = max(len(res), longest_pcode_len)
                     else:
                         continue
 
         # if still matches (mostly a failsafe), add it to the search results
         if matches:
             search_results[filename] = result
-            longest_name_len = max(len(filename), longest_name_len)
+
+column_lengths = []
+lines = []
+
+
+def add_to_table(line):
+    global column_lengths, lines
+    for idx, col in enumerate(line):
+        print(idx)
+        print(col)
+        column_lengths[idx] = max(len(col), column_lengths[idx])
+    lines.append(line)
+
 
 if search_results:
-    header = ['Filename'.ljust(longest_name_len), 'Type']
+    header = ['Filename', 'Type']
     if a.title_id:
-        header.append('Title ID        ')
+        header.append('Title ID')
     if a.product_code:
         header.append('Product Code')
-    header_print = ' | '.join(header)
-    print(header_print)
+    print(len(header))
+    column_lengths = [0] * len(header)
+    add_to_table(header)
 
     for filename, result in search_results.items():
-        line = [filename + ' ' * (longest_name_len - len(filename)), result['type']]
+        line = [filename, result['type']]
         if 'tid' in result:
             line.append(result['tid'])
         if 'pcode' in result:
-            line.append(result['pcode'].ljust(longest_pcode_len))
-        print(' | '.join(line))
+            line.append(result['pcode'])
+        add_to_table(line)
+
+    for line in lines:
+        print(' | '.join(col.ljust(column_lengths[idx]) for idx, col in enumerate(line)))
 else:
     print('No files matched the given search terms.')
