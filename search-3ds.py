@@ -17,19 +17,20 @@ except ImportError:
 
 parser = argparse.ArgumentParser(description='Searches contents in files used on the Nintendo 3DS system.')
 parser.add_argument('--path', metavar='DIR', help='path to search, defaults to current directory', default='.')
-# parser.add_argument('--no-format', metavar='PATH', help='don\'t format results like a table (NYI)', default='.')
+# parser.add_argument('--no-format', help='don\'t format results like a table (NYI)', default='.')
 
 terms = parser.add_argument_group('terms')
-terms.add_argument('--name', '-n', metavar='NAME', help='title name (in smdh, displays on HOME Menu)')
-terms.add_argument('--strict-name', '-N', metavar='NAME', help='case-sensitive title name (in smdh, displays on HOME Menu)')
-terms.add_argument('--title-id', '-i', metavar='TID', help='title id')
 terms.add_argument('--type', '-t', metavar='NAME', help='file types to search, separated by commas')
+terms.add_argument('--name', '-n', metavar='NAME', help='title name (in smdh, displays on HOME Menu) - entire name not required')
+terms.add_argument('--strict-name', '-N', metavar='NAME', help='case-sensitive title name (in smdh, displays on HOME Menu) - entire name not required')
+terms.add_argument('--title-id', '-i', metavar='TID', help='title id (e.g. 0004000000046500)')
+terms.add_argument('--product-code', '-p', metavar='CODE', help='product code (e.g. CTR-P-AQNE) - entire product code not required')
 
 a = parser.parse_args()
 
 # if you know of a better way to check if at least one of the terms was used,
 #   let me know please
-if not (a.name or a.strict_name or a.title_id or a.type):
+if not (a.type or a.name or a.strict_name or a.title_id or a.product_code):
     parser.print_usage()
     sys.exit(1)
 
@@ -83,25 +84,43 @@ def roundup(x):
 # types: 'tid', ...
 def check_ticket(tik, content, cktype):
     if cktype == 'tid':
-        return tik[0x1DC:0x1E4] == bytes.fromhex(content)
+        tid = tik[0x1DC:0x1E4]
+        if bytes.fromhex(content) == tid:
+            return tid
+        return False
+    return False
 
 
 # types: 'tid', ...
 # checks starting at 0x100 (ignoring signature)
 def check_ncch(ncch, content, cktype):
     if cktype == 'tid':
-        return ncch[0x8:0x10][::-1] == bytes.fromhex(content)
+        tid = ncch[0x8:0x10][::-1]
+        if bytes.fromhex(content) == tid:
+            return tid.hex()
+        return False
+    elif cktype == 'pcode':
+        pcode = ncch[0x50:0x60].strip().decode('utf-8')
+        if content.lower() in pcode.lower():
+            return pcode
+        return False
+    return False
 
 
 # types: 'tid', ...
 # checks starting at 0x100 (ignoring signature)
 def check_ncsd(ncsd, content, cktype):
     if cktype == 'tid':
-        return ncsd[0x8:0x10][::-1] == bytes.fromhex(content)
+        tid = ncsd[0x8:0x10][::-1]
+        if bytes.fromhex(content) == tid:
+            return tid.hex()
+        return False
 
 
 search_results = OrderedDict()
-longest_name_len = 8  # for use when displaying a table
+# for use when displaying a table
+longest_name_len = 8
+longest_pcode_len = 12
 
 for filename in big_list_of_files:
     with open(filename, 'rb') as f:
@@ -132,39 +151,68 @@ for filename in big_list_of_files:
                     result['tid'] = a.title_id.lower()
                 else:
                     continue
+
+            if a.product_code:
+                # TODO: this (product-code in cia)
+                continue
+
         else:
+            # check for ncch/ncsd header
             f.seek(0x100)
-            magic = f.read(4)
-            if magic == b'NCCH':
+            file_header = f.read(0x100)
+            if file_header[0:4] == b'NCCH':
                 matches = 'ncch' in types
                 if not matches:
                     break
                 result['type'] = 'NCCH'
 
                 if a.title_id:
-                    # read tid from ncch header
-                    f.seek(0x100)
-                    matches = check_ncch(f.read(0x100), a.title_id, 'tid')
-                    if matches:
-                        result['tid'] = a.title_id.lower()
+                    res = check_ncch(file_header, a.title_id, 'tid')
+                    if res:
+                        result['tid'] = res
+                        matches = True
+                        longest_pcode_len = max(len(res), longest_pcode_len)
                     else:
                         continue
-            elif magic == b'NCSD':
+
+                if a.product_code:
+                    res = check_ncch(file_header, a.product_code, 'pcode')
+                    if res:
+                        result['pcode'] = res
+                        matches = True
+                    else:
+                        continue
+
+            elif file_header[0:4] == b'NCSD':
                 matches = 'cci' in types
                 if not matches:
                     break
                 # special check to make sure it's not a nand backup
-                f.seek(0x10C)
-                if f.read(4) != b'\0\0\4\0':
+                if file_header[0xC:0x10] != b'\0\0\4\0':
                     continue
                 result['type'] = 'CCI '
 
+                # the ncch offset is assumed to be 0x4000 since every cci ever
+                #   has it start here. i'm also being lazy. maybe i'll
+                #   properly implement offset reading later.
+                f.seek(0x4100)
+                ncch_header = f.read(0x100)
+
                 if a.title_id:
                     # read tid from ncsd header
-                    f.seek(0x100)
-                    matches = check_ncch(f.read(0x100), a.title_id, 'tid')
-                    if matches:
-                        result['tid'] = a.title_id.lower()
+                    res = check_ncch(ncch_header, a.title_id, 'tid')
+                    if res:
+                        result['tid'] = res
+                        matches = True
+                    else:
+                        continue
+
+                if a.product_code:
+                    res = check_ncch(ncch_header, a.product_code, 'pcode')
+                    if res:
+                        result['pcode'] = res
+                        matches = True
+                        longest_pcode_len = max(len(res), longest_pcode_len)
                     else:
                         continue
 
@@ -174,9 +222,11 @@ for filename in big_list_of_files:
             longest_name_len = max(len(filename), longest_name_len)
 
 if search_results:
-    header = ['Filename' + ' ' * (longest_name_len - 8), 'Type']
+    header = ['Filename'.ljust(longest_name_len), 'Type']
     if a.title_id:
         header.append('Title ID        ')
+    if a.product_code:
+        header.append('Product Code')
     header_print = ' | '.join(header)
     print(header_print)
 
@@ -184,6 +234,8 @@ if search_results:
         line = [filename + ' ' * (longest_name_len - len(filename)), result['type']]
         if 'tid' in result:
             line.append(result['tid'])
+        if 'pcode' in result:
+            line.append(result['pcode'].ljust(longest_pcode_len))
         print(' | '.join(line))
 else:
     print('No files matched the given search terms.')
