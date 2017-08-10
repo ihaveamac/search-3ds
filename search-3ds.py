@@ -5,8 +5,7 @@ import os
 import struct
 import sys
 from collections import OrderedDict
-from glob import iglob
-from os.path import join as pjoin  # this feels dirty
+from pathlib import Path
 
 encryption_supported = False
 try:
@@ -18,7 +17,7 @@ except ImportError:
 
 parser = argparse.ArgumentParser(description='Searches contents in files used on the Nintendo 3DS system.')
 parser.add_argument('--path', metavar='DIR', help='path to search, defaults to current directory', default='')
-parser.add_argument('--verbose', '-v', help='print more information', action='count', default=0)
+parser.add_argument('--verbose', '-v', help='print more information, use multiple times for more verbosity', action='count', default=0)
 parser.add_argument('--search-all', help='search every file, without basing on extension', action='store_true')
 # parser.add_argument('--no-format', help='don\'t format results like a table (NYI)', default='.')
 
@@ -62,10 +61,17 @@ big_list_of_files = []
 def addtolist(*ext):
     for e in ext:
         # to avoid duplicates, which are possible when looking for *.*
-        for f in iglob(pjoin(a.path, '**/*' + e), recursive=True):
-            if os.path.isfile(f) and f not in big_list_of_files:
-                print_v('Adding {} to list for searching'.format(f), v=2)
-                big_list_of_files.append(f)
+        try:
+            for f in Path(a.path).glob(os.path.join('**/*' + e)):
+                f_s = str(f)
+                if os.path.isfile(f_s) and f_s not in big_list_of_files:
+                    print_v('Adding {} to list for searching'.format(f_s), v=2)
+                    big_list_of_files.append(f_s)
+        except OSError as err:
+            if err.errno == 62:
+                print_v('Pathname too long. Ending listing for "{}".'.format(e))
+            else:
+                raise
 
 
 print_v('Listing files to scan', v=1)
@@ -86,7 +92,7 @@ if a.type and a.type != 'all':
         if 'cci' in types or '3ds' in types:
             addtolist('.cci', '.3ds')
         if 'ncch' in types:
-            addtolist('.ncch', '.cxi', '.cfa', '.app', '*.{}.{}*'.format('[0-9a-f]' * 4, '[0-9a-f]' * 8))  # what the fuck?
+            addtolist('.ncch', '.cxi', '.cfa', '.app', '.{}.{}*'.format('[0-9a-f]' * 4, '[0-9a-f]' * 8))  # what the fuck?
             # last option is to follow the format <name>.<index>.<id> that ctrtool
             #   saves cia contents as
         if 'tik' in types or 'ticket' in types:
@@ -104,7 +110,7 @@ else:
         addtolist('')
     else:
         # last ones are not separate types, just filename formats/extensions
-        addtolist('.cia', '.cci', '.3ds', '.ncch', '.cxi', '.cfa', '.tik', '.tmd', '.exefs', '.bin', '.app', '*.{}.{}*'.format('[0-9a-f]' * 4, '[0-9a-f]' * 8))  # what the fuck?????
+        addtolist('.cia', '.cci', '.3ds', '.ncch', '.cxi', '.cfa', '.tik', '.tmd', '.exefs', '.bin', '.app', '.{}.{}*'.format('[0-9a-f]' * 4, '[0-9a-f]' * 8))  # what the fuck?????
 
 print_v('Done listing files', v=1)
 
@@ -120,10 +126,14 @@ def roundup(x):
 
 # types: 'tid', ...
 def check_ticket(tik, content, cktype):
+    tid = tik[0x1DC:0x1E4]
+    if content == '.show':
+        if cktype == 'tid':
+            return tid.hex()
+        return False
     if cktype == 'tid':
-        tid = tik[0x1DC:0x1E4]
         if bytes.fromhex(content) == tid:
-            return tid
+            return tid.hex()
         return False
     return False
 
@@ -131,13 +141,19 @@ def check_ticket(tik, content, cktype):
 # types: 'tid', ...
 # checks starting at 0x100 (ignoring signature)
 def check_ncch(ncch, content, cktype):
+    tid = ncch[0x8:0x10][::-1]
+    pcode = ncch[0x50:0x60].rstrip(b'\0').decode('utf-8')
+    if content == '.show':
+        if cktype == 'tid':
+            return tid.hex()
+        elif cktype == 'pcode':
+            return pcode
+        return False
     if cktype == 'tid':
-        tid = ncch[0x8:0x10][::-1]
         if bytes.fromhex(content) == tid:
             return tid.hex()
         return False
     elif cktype == 'pcode':
-        pcode = ncch[0x50:0x60].strip().decode('utf-8')
         if content.lower() in pcode.lower():
             return pcode
         return False
@@ -147,8 +163,12 @@ def check_ncch(ncch, content, cktype):
 # types: 'tid', ...
 # checks starting at 0x100 (ignoring signature)
 def check_ncsd(ncsd, content, cktype):
+    tid = ncsd[0x8:0x10][::-1]
+    if content == '.show':
+        if cktype == 'tid':
+            return tid.hex()
+        return False
     if cktype == 'tid':
-        tid = ncsd[0x8:0x10][::-1]
         if bytes.fromhex(content) == tid:
             return tid.hex()
         return False
@@ -181,12 +201,26 @@ for filename in big_list_of_files:
 
             f.seek(0x2A40)
             ticket = f.read(0x350)
+            # no need to do a tid check here, if it's in a cia it's probably
+            #   for 3DS
+
+            # get signer (determines retail/dev)
+            ticket_cert_name = ticket[0x150:0x15A]
+            if ticket_cert_name == b'XS0000000c':
+                is_dev = 0
+            elif ticket_cert_name == b'XS00000009':
+                is_dev = 1
+                result['type'] = 'CIA (dev)'
+            else:
+                print_v('Ticket certificate unknown! Found {}. This shouldn\'t be happening. Is this a valid CIA?'.format(ticket_cert_name))
+                continue
 
             if a.title_id:
                 # read tid from ticket
-                matches = check_ticket(ticket, a.title_id, 'tid')
-                if matches:
-                    result['tid'] = a.title_id.lower()
+                res = check_ticket(ticket, a.title_id, 'tid')
+                if res:
+                    result['tid'] = res
+                    matches = True
                 else:
                     continue
 
@@ -197,15 +231,6 @@ for filename in big_list_of_files:
 
             if is_encrypted:
                 if encryption_supported:
-                    # get signer (determines retail/dev)
-                    ticket_cert_name = ticket[0x150:0x15A]
-                    if ticket_cert_name == b'XS0000000c':
-                        is_dev = 0
-                    elif ticket_cert_name == b'XS00000009':
-                        is_dev = 1
-                    else:
-                        print('Ticket certificate unknown! Found {}. This shouldn\'t be happening. Is this a valid CIA?'.format(ticket_cert_name))
-                        continue
                     # get encrypted titlekey
                     enc_titlekey = ticket[0x1BF:0x1CF]
                     # get common key index
@@ -303,6 +328,37 @@ for filename in big_list_of_files:
 
                 if encryption_supported and (a.name or a.strict_name):
                     continue  # TODO: this
+
+            else:
+                # not ncch/ncsd
+                # check to see if it's a ticket
+                f.seek(0x150)
+                cert_name = f.read(0xA)
+                if cert_name.startswith(b'XS'):
+                    f.seek(0)
+                    ticket = f.read(0x350)
+                # tid check, to make sure it's 3DS and not other systems
+                if ticket[0x1DC:0x1DE] != b'\0\4':
+                    continue
+                if cert_name == b'XS0000000c':
+                    result['type'] = 'TIK'
+                elif cert_name == b'XS00000009':
+                    result['type'] = 'TIK (dev)'
+                else:
+                    print_v('Ticket certificate unknown! Found {}. This shouldn\'t be happening. Is this a valid 3DS ticket?'.format(ticket_cert_name))
+                    continue
+
+                if a.title_id:
+                    # read tid from ticket
+                    res = check_ticket(ticket, a.title_id, 'tid')
+                    if res:
+                        result['tid'] = res
+                        matches = True
+                    else:
+                        continue
+
+                if a.product_code or a.name or a.strict_name:
+                    continue  # not relevant to a ticket
 
         # if still matches (mostly a failsafe), add it to the search results
         if matches:
