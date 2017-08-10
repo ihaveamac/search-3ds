@@ -131,8 +131,9 @@ def check_ticket(tik, content, cktype):
         if cktype == 'tid':
             return tid.hex()
         return False
+    contents = content.split(',')
     if cktype == 'tid':
-        if bytes.fromhex(content) == tid:
+        if any(bytes.fromhex(c) == tid for c in contents):
             return tid.hex()
         return False
     return False
@@ -149,12 +150,13 @@ def check_ncch(ncch, content, cktype):
         elif cktype == 'pcode':
             return pcode
         return False
+    contents = content.split(',')
     if cktype == 'tid':
-        if bytes.fromhex(content) == tid:
+        if any(bytes.fromhex(c) == tid for c in contents):
             return tid.hex()
         return False
     elif cktype == 'pcode':
-        if content.lower() in pcode.lower():
+        if any(c.lower() in pcode.lower() for c in contents):
             return pcode
         return False
     return False
@@ -168,8 +170,9 @@ def check_ncsd(ncsd, content, cktype):
         if cktype == 'tid':
             return tid.hex()
         return False
+    contents = content.split(',')
     if cktype == 'tid':
-        if bytes.fromhex(content) == tid:
+        if any(bytes.fromhex(c) == tid for c in contents):
             return tid.hex()
         return False
 
