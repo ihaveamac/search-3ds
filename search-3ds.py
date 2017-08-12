@@ -19,7 +19,7 @@ parser = argparse.ArgumentParser(description='Searches contents in files used on
 parser.add_argument('--path', metavar='DIR', help='path to search, defaults to current directory', default='')
 parser.add_argument('--verbose', '-v', help='print more information, use multiple times for more verbosity', action='count', default=0)
 parser.add_argument('--search-all', help='search every file, without basing on extension', action='store_true')
-# parser.add_argument('--no-format', help='don\'t format results like a table (NYI)', default='.')
+parser.add_argument('--no-format', help='don\'t format results like a table', action='store_true')
 
 terms = parser.add_argument_group('terms')
 terms.add_argument('--type', '-t', metavar='NAME', help='file types to search, separated by commas')
@@ -99,10 +99,6 @@ if a.type and a.type != 'all':
             addtolist('.tik')
         if 'tmd' in types:
             addtolist('.tmd')
-        # if 'exefs' in types:
-        #     # exefs is also commonly with a .bin filename; some tools use .exefs
-        #     #   like GodMode9
-        #     addtolist('.exefs')
 else:
     # this doesn't feel right
     types = 'all'
@@ -110,7 +106,7 @@ else:
         addtolist('')
     else:
         # last ones are not separate types, just filename formats/extensions
-        addtolist('.cia', '.cci', '.3ds', '.ncch', '.cxi', '.cfa', '.tik', '.tmd', '.exefs', '.bin', '.app', '.{}.{}*'.format('[0-9a-f]' * 4, '[0-9a-f]' * 8))  # what the fuck?????
+        addtolist('.cia', '.cci', '.3ds', '.ncch', '.cxi', '.cfa', '.tik', '.tmd', '.bin', '.app', '.{}.{}*'.format('[0-9a-f]' * 4, '[0-9a-f]' * 8))  # what the fuck?????
 
 print_v('Done listing files', v=1)
 
@@ -124,9 +120,8 @@ def roundup(x):
     return ((x + 63) >> 6) << 6
 
 
-# types: 'tid', ...
-def check_ticket(tik, content, cktype):
-    tid = tik[0x1DC:0x1E4]
+def check_ticket(ticket, content, cktype):
+    tid = ticket[0x1DC:0x1E4]
     if content == '.show':
         if cktype == 'tid':
             return tid.hex()
@@ -139,7 +134,20 @@ def check_ticket(tik, content, cktype):
     return False
 
 
-# types: 'tid', ...
+def check_tmd(tmd, content, cktype):
+    tid = tmd[0x1DC:0x1E4]
+    if content == '.show':
+        if cktype == 'tid':
+            return tid.hex()
+        return False
+    contents = content.split(',')
+    if cktype == 'tid':
+        if any(bytes.fromhex(c) == tid for c in contents):
+            return tid.hex()
+        return False
+    return False
+
+
 # checks starting at 0x100 (ignoring signature)
 def check_ncch(ncch, content, cktype):
     tid = ncch[0x8:0x10][::-1]
@@ -162,7 +170,6 @@ def check_ncch(ncch, content, cktype):
     return False
 
 
-# types: 'tid', ...
 # checks starting at 0x100 (ignoring signature)
 def check_ncsd(ncsd, content, cktype):
     tid = ncsd[0x8:0x10][::-1]
@@ -175,6 +182,10 @@ def check_ncsd(ncsd, content, cktype):
         if any(bytes.fromhex(c) == tid for c in contents):
             return tid.hex()
         return False
+
+
+def check_smdh(smdh, content, cktype):
+    pass  # TODO: this
 
 
 search_results = OrderedDict()
@@ -273,7 +284,7 @@ for filename in big_list_of_files:
             if file_header[0:4] == b'NCCH':
                 matches = check_type('ncch')
                 if not matches:
-                    break
+                    continue
                 result['type'] = 'NCCH'
 
                 if a.title_id:
@@ -334,34 +345,68 @@ for filename in big_list_of_files:
 
             else:
                 # not ncch/ncsd
-                # check to see if it's a ticket
+                # check to see if it's a ticket or tmd
                 f.seek(0x150)
                 cert_name = f.read(0xA)
-                if cert_name.startswith(b'XS'):
+                if cert_name.startswith(b'XS'):  # ticket
+                    matches = check_type('tik')
+                    if not matches:
+                        continue
                     f.seek(0)
                     ticket = f.read(0x350)
-                # tid check, to make sure it's 3DS and not other systems
-                if ticket[0x1DC:0x1DE] != b'\0\4':
-                    continue
-                if cert_name == b'XS0000000c':
-                    result['type'] = 'TIK'
-                elif cert_name == b'XS00000009':
-                    result['type'] = 'TIK (dev)'
-                else:
-                    print_v('Ticket certificate unknown! Found {}. This shouldn\'t be happening. Is this a valid 3DS ticket?'.format(ticket_cert_name))
-                    continue
-
-                if a.title_id:
-                    # read tid from ticket
-                    res = check_ticket(ticket, a.title_id, 'tid')
-                    if res:
-                        result['tid'] = res
-                        matches = True
+                    # tid check, to make sure it's 3DS and not other systems
+                    if ticket[0x1DC:0x1DE] != b'\0\4':
+                        continue
+                    if cert_name == b'XS0000000c':
+                        result['type'] = 'TIK'
+                    elif cert_name == b'XS00000009':
+                        result['type'] = 'TIK (dev)'
                     else:
+                        print_v('Ticket certificate unknown! Found {}. This shouldn\'t be happening. Is this a valid 3DS ticket?'.format(cert_name))
                         continue
 
-                if a.product_code or a.name or a.strict_name:
-                    continue  # not relevant to a ticket
+                    if a.title_id:
+                        # read tid from ticket
+                        res = check_ticket(ticket, a.title_id, 'tid')
+                        if res:
+                            result['tid'] = res
+                            matches = True
+                        else:
+                            continue
+
+                    if a.product_code or a.name or a.strict_name:
+                        continue  # not relevant to a ticket
+
+                elif cert_name.startswith(b'CP'):  # tmd
+                    matches = check_type('tmd')
+                    if not matches:
+                        continue
+                    f.seek(0x1DE)
+                    content_count = int.from_bytes(f.read(2), 'big')
+                    f.seek(0)
+                    tmd = f.read(0xB04 + (0x30 * content_count))
+                    # tid check, to make sure it's 3DS and not other systems
+                    if tmd[0x18C:0x18E] != b'\0\4':
+                        continue
+                    if cert_name == b'CP0000000b':
+                        result['type'] = 'TMD'
+                    elif cert_name == b'CP0000000a':
+                        result['type'] = 'TMD (dev)'
+                    else:
+                        print_v('Ticket certificate unknown! Found {}. This shouldn\'t be happening. Is this a valid 3DS tmd?'.format(cert_name))
+                        continue
+
+                    if a.title_id:
+                        # read tid from tmd
+                        res = check_tmd(tmd, a.title_id, 'tid')
+                        if res:
+                            result['tid'] = res
+                            matches = True
+                        else:
+                            continue
+
+                    if a.product_code or a.name or a.strict_name:
+                        continue  # not relevant to a tmd
 
         # if still matches (mostly a failsafe), add it to the search results
         if matches:
@@ -373,8 +418,9 @@ lines = []
 
 def add_to_table(line):
     global column_lengths, lines
-    for idx, col in enumerate(line):
-        column_lengths[idx] = max(len(col), column_lengths[idx])
+    if not a.no_format:
+        for idx, col in enumerate(line):
+            column_lengths[idx] = max(len(col), column_lengths[idx])
     lines.append(line)
 
 
@@ -384,8 +430,9 @@ if search_results:
         header.append('Title ID')
     if a.product_code:
         header.append('Product Code')
-    column_lengths = [0] * len(header)
-    add_to_table(header)
+    if not a.no_format:
+        column_lengths = [0] * len(header)
+        add_to_table(header)
 
     for filename, result in search_results.items():
         line = [filename, result['type']]
@@ -396,10 +443,15 @@ if search_results:
         add_to_table(line)
 
     for line_idx, line in enumerate(lines):
-        if line_idx == 0 and os.name != 'nt':  # windows cmd doesn't have our fancy terminal formatting
-            print('\033[4m', end='')  # fancy underline, if the terminal supports it
-        print(' | '.join(col.ljust(column_lengths[idx]) for idx, col in enumerate(line)))
-        if line_idx == 0 and os.name != 'nt':
-            print('\033[0m', end='')
+        if a.no_format:
+            if line_idx == 0:
+                continue
+            print('; '.join(header[idx] + ': ' + col for idx, col in enumerate(line)))
+        else:
+            if line_idx == 0 and os.name != 'nt':  # windows cmd doesn't have our fancy terminal formatting
+                print('\033[4m', end='')  # fancy underline, if the terminal supports it
+            print(' | '.join(col.ljust(column_lengths[idx]) for idx, col in enumerate(line)))
+            if line_idx == 0 and os.name != 'nt':
+                print('\033[0m', end='')
 else:
     print('No files matched the given search terms.')
