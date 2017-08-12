@@ -4,6 +4,7 @@ import argparse
 import os
 import struct
 import sys
+import traceback
 from collections import OrderedDict
 from pathlib import Path
 
@@ -20,6 +21,7 @@ parser.add_argument('--path', metavar='DIR', help='path to search, defaults to c
 parser.add_argument('--verbose', '-v', help='print more information, use multiple times for more verbosity', action='count', default=0)
 parser.add_argument('--search-all', help='search every file, without basing on extension', action='store_true')
 parser.add_argument('--no-format', help='don\'t format results like a table', action='store_true')
+parser.add_argument('--err', help='dump traceback when an exception occurs', action='store_true')
 
 terms = parser.add_argument_group('terms')
 terms.add_argument('--type', '-t', metavar='TYPE', help='file types to search, separated by commas')
@@ -247,136 +249,48 @@ def check_smdh(smdh, content, cktype):
 search_results = OrderedDict()
 
 for filename in big_list_of_files:
-    with open(filename, 'rb') as f:
-        print_v('Searching {} for matches'.format(filename), v=2)
-        matches = False
-        result = {}
-        dev = 0  # to use proper keys
+    try:
+        with open(filename, 'rb') as f:
+            print_v('Searching {} for matches'.format(filename), v=2)
+            matches = False
+            result = {}
+            dev = 0  # to use proper keys
 
-        # determine the real file type
+            # determine the real file type
 
-        # cia header; archive header size, type, version, cert chain size, and
-        #   ticket size never change
-        cia_header = struct.pack('<IHHII', 0x2020, 0, 0, 0xA00, 0x350)
-        if f.read(0x10) == cia_header:
-            matches = check_type('cia')
-            if not matches:
-                break
-            result['type'] = 'CIA'
-
-            # since the sizes of everything before the tmd are fixed, we just
-            #   need the tmd size to reach the content.
-            tmd_size = int.from_bytes(f.read(4), 'little')
-            content_offset = 0x2DC0 + roundup(tmd_size)
-
-            f.seek(0x2A40)
-            ticket = f.read(0x350)
-            # no need to do a tid check here, if it's in a cia it's probably
-            #   for 3DS
-
-            # get signer (determines retail/dev)
-            ticket_cert_name = ticket[0x150:0x15A]
-            if ticket_cert_name == b'XS0000000c':
-                is_dev = 0
-            elif ticket_cert_name == b'XS00000009':
-                is_dev = 1
-                result['type'] = 'CIA (dev)'
-            else:
-                print_v('Ticket certificate unknown! Found {}. This shouldn\'t be happening. Is this a valid CIA?'.format(ticket_cert_name))
-                continue
-
-            if a.title_id:
-                # read tid from ticket
-                res = check_ticket(ticket, a.title_id, 'tid')
-                if res:
-                    result['tid'] = res
-                    matches = True
-                else:
-                    continue
-
-            if a.unique_id:
-                # read uid from ticket
-                res = check_ticket(ticket, a.unique_id, 'uid')
-                if res:
-                    result['uid'] = res
-                    matches = True
-                else:
-                    continue
-
-            # this is very lazy, but given fixed offsets this should not change
-            f.seek(0x38CA)
-            content_type = int.from_bytes(f.read(0x2), 'big')
-            is_encrypted = content_type & 1
-
-            if is_encrypted:
-                if encryption_supported:
-                    # get encrypted titlekey
-                    enc_titlekey = ticket[0x1BF:0x1CF]
-                    # get common key index
-                    common_key_index = ticket[0x1F1]
-                    # decrypt titlekey
-                    cipher_titlekey = AES.new(bytes.fromhex(common_keys[common_key_index][is_dev]), AES.MODE_CBC, ticket[0x1DC:0x1E4] + (b'\0' * 8))
-                    dec_titlekey = cipher_titlekey.decrypt(enc_titlekey)
-                    f.seek(content_offset)
-                    cipher_content0 = AES.new(dec_titlekey, AES.MODE_CBC, b'\0' * 0x10)
-                    ncch_header_pre = cipher_content0.decrypt(f.read(0x200))
-                    ncch_key_y = ncch_header_pre[0:0x10]
-                    ncch_header = ncch_header_pre[0x100:0x200]
-                else:
-                    print_v('Not searching {} any further due to no encryption support.'.format(filename))
-                    continue
-            else:
-                f.seek(content_offset)
-                ncch_key_y = f.read(0x10)
-                f.seek(0xF0, 1)
-                ncch_header = f.read(0x100)
-
-            if ncch_header[0:4] != b'NCCH':
-                continue  # either corrupted, or DSi title
-
-            ncch_flag_5 = ncch_header[0x8D]  # content type
-            ncch_flag_7 = ncch_header[0x8F]  # bit-masks (for crypto)
-            is_ncch_encrypted = not ncch_flag_7 & 4
-            is_ncch_zerokey_encrypted = ncch_flag_7 & 1
-
-            if a.product_code:
-                res = check_ncch(ncch_header, a.product_code, 'pcode')
-                if res:
-                    result['pcode'] = res
-                    matches = True
-                else:
-                    continue
-
-            if is_ncch_encrypted or is_ncch_zerokey_encrypted:
-                if encryption_supported:
-                    print_v('Not searching {} any further due to NCCH crypto not being implemented.'.format(filename))
-                    if a.name or a.strict_name or a.publisher:
-                        continue
-                else:
-                    print_v('Not searching {} any further due to no encryption support.'.format(filename))
-                    continue
-
-        else:
-            f.seek(0)
-            # read keyY while we're here
-            ncch_key_y = f.read(0x10)
-            # check for ncch/ncsd header
-            f.seek(0xF0, 1)
-            file_header = f.read(0x100)
-            if file_header[0:4] == b'NCCH':
-                matches = check_type('ncch')
+            # cia header; archive header size, type, version, cert chain size, and
+            #   ticket size never change
+            cia_header = struct.pack('<IHHII', 0x2020, 0, 0, 0xA00, 0x350)
+            if f.read(0x10) == cia_header:
+                matches = check_type('cia')
                 if not matches:
+                    break
+                result['type'] = 'CIA'
+
+                # since the sizes of everything before the tmd are fixed, we just
+                #   need the tmd size to reach the content.
+                tmd_size = int.from_bytes(f.read(4), 'little')
+                content_offset = 0x2DC0 + roundup(tmd_size)
+
+                f.seek(0x2A40)
+                ticket = f.read(0x350)
+                # no need to do a tid check here, if it's in a cia it's probably
+                #   for 3DS
+
+                # get signer (determines retail/dev)
+                ticket_cert_name = ticket[0x150:0x15A]
+                if ticket_cert_name == b'XS0000000c':
+                    is_dev = 0
+                elif ticket_cert_name == b'XS00000009':
+                    is_dev = 1
+                    result['type'] = 'CIA (dev)'
+                else:
+                    print_v('Ticket certificate unknown! Found {}. This shouldn\'t be happening. Is this a valid CIA?'.format(ticket_cert_name))
                     continue
-
-                ncch_flag_5 = file_header[0x8D]  # content type
-                ncch_flag_7 = file_header[0x8F]  # bit-masks (for crypto)
-                is_ncch_encrypted = not ncch_flag_7 & 4
-                is_ncch_zerokey_encrypted = ncch_flag_7 & 1
-
-                result['type'] = 'NCCH/' + ('CXI' if ncch_flag_5 & 2 else 'CFA')
 
                 if a.title_id:
-                    res = check_ncch(file_header, a.title_id, 'tid')
+                    # read tid from ticket
+                    res = check_ticket(ticket, a.title_id, 'tid')
                     if res:
                         result['tid'] = res
                         matches = True
@@ -384,68 +298,49 @@ for filename in big_list_of_files:
                         continue
 
                 if a.unique_id:
-                    res = check_ncch(file_header, a.unique_id, 'uid')
+                    # read uid from ticket
+                    res = check_ticket(ticket, a.unique_id, 'uid')
                     if res:
                         result['uid'] = res
                         matches = True
                     else:
                         continue
 
-                if a.product_code:
-                    res = check_ncch(file_header, a.product_code, 'pcode')
-                    if res:
-                        result['pcode'] = res
-                        matches = True
-                    else:
-                        continue
+                # this is very lazy, but given fixed offsets this should not change
+                f.seek(0x38CA)
+                content_type = int.from_bytes(f.read(0x2), 'big')
+                is_encrypted = content_type & 1
 
-                if is_ncch_encrypted or is_ncch_zerokey_encrypted:
+                if is_encrypted:
                     if encryption_supported:
-                        print_v('Not searching {} any further due to NCCH crypto not being implemented.'.format(filename))
-                        if a.name or a.strict_name or a.publisher:
-                            continue
+                        # get encrypted titlekey
+                        enc_titlekey = ticket[0x1BF:0x1CF]
+                        # get common key index
+                        common_key_index = ticket[0x1F1]
+                        # decrypt titlekey
+                        cipher_titlekey = AES.new(bytes.fromhex(common_keys[common_key_index][is_dev]), AES.MODE_CBC, ticket[0x1DC:0x1E4] + (b'\0' * 8))
+                        dec_titlekey = cipher_titlekey.decrypt(enc_titlekey)
+                        f.seek(content_offset)
+                        cipher_content0 = AES.new(dec_titlekey, AES.MODE_CBC, b'\0' * 0x10)
+                        ncch_header_pre = cipher_content0.decrypt(f.read(0x200))
+                        ncch_key_y = ncch_header_pre[0:0x10]
+                        ncch_header = ncch_header_pre[0x100:0x200]
                     else:
                         print_v('Not searching {} any further due to no encryption support.'.format(filename))
                         continue
+                else:
+                    f.seek(content_offset)
+                    ncch_key_y = f.read(0x10)
+                    f.seek(0xF0, 1)
+                    ncch_header = f.read(0x100)
 
-            elif file_header[0:4] == b'NCSD':
-                matches = check_type('cci')
-                if not matches:
-                    break
-                # special check to make sure it's not a nand backup
-                if file_header[0xC:0x10] != b'\0\0\4\0':
-                    continue
-                result['type'] = 'CCI'
-
-                # the ncch offset is assumed to be 0x4000 since every cci ever
-                #   has it start here. i'm also being lazy. maybe i'll
-                #   properly implement offset reading later.
-                f.seek(0x4000)
-                ncch_key_y = f.read(0x10)
-                f.seek(0xF0, 1)
-                ncch_header = f.read(0x100)
+                if ncch_header[0:4] != b'NCCH':
+                    continue  # either corrupted, or DSi title
 
                 ncch_flag_5 = ncch_header[0x8D]  # content type
                 ncch_flag_7 = ncch_header[0x8F]  # bit-masks (for crypto)
                 is_ncch_encrypted = not ncch_flag_7 & 4
                 is_ncch_zerokey_encrypted = ncch_flag_7 & 1
-
-                if a.title_id:
-                    # read tid from ncsd header
-                    res = check_ncch(ncch_header, a.title_id, 'tid')
-                    if res:
-                        result['tid'] = res
-                        matches = True
-                    else:
-                        continue
-
-                if a.unique_id:
-                    res = check_ncch(ncch_header, a.unique_id, 'uid')
-                    if res:
-                        result['uid'] = res
-                        matches = True
-                    else:
-                        continue
 
                 if a.product_code:
                     res = check_ncch(ncch_header, a.product_code, 'pcode')
@@ -465,30 +360,26 @@ for filename in big_list_of_files:
                         continue
 
             else:
-                # not ncch/ncsd
-                # check to see if it's a ticket or tmd
-                f.seek(0x150)
-                cert_name = f.read(0xA)
-                if cert_name.startswith(b'XS'):  # ticket
-                    matches = check_type('tik')
+                f.seek(0)
+                # read keyY while we're here
+                ncch_key_y = f.read(0x10)
+                # check for ncch/ncsd header
+                f.seek(0xF0, 1)
+                file_header = f.read(0x100)
+                if file_header[0:4] == b'NCCH':
+                    matches = check_type('ncch')
                     if not matches:
                         continue
-                    f.seek(0)
-                    ticket = f.read(0x350)
-                    # tid check, to make sure it's 3DS and not other systems
-                    if ticket[0x1DC:0x1DE] != b'\0\4':
-                        continue
-                    if cert_name == b'XS0000000c':
-                        result['type'] = 'TIK'
-                    elif cert_name == b'XS00000009':
-                        result['type'] = 'TIK (dev)'
-                    else:
-                        print_v('Ticket certificate unknown! Found {}. This shouldn\'t be happening. Is this a valid 3DS ticket?'.format(cert_name))
-                        continue
+
+                    ncch_flag_5 = file_header[0x8D]  # content type
+                    ncch_flag_7 = file_header[0x8F]  # bit-masks (for crypto)
+                    is_ncch_encrypted = not ncch_flag_7 & 4
+                    is_ncch_zerokey_encrypted = ncch_flag_7 & 1
+
+                    result['type'] = 'NCCH/' + ('CXI' if ncch_flag_5 & 2 else 'CFA')
 
                     if a.title_id:
-                        # read tid from ticket
-                        res = check_ticket(ticket, a.title_id, 'tid')
+                        res = check_ncch(file_header, a.title_id, 'tid')
                         if res:
                             result['tid'] = res
                             matches = True
@@ -496,39 +387,55 @@ for filename in big_list_of_files:
                             continue
 
                     if a.unique_id:
-                        # read uid from ticket
-                        res = check_ticket(ticket, a.unique_id, 'uid')
+                        res = check_ncch(file_header, a.unique_id, 'uid')
                         if res:
                             result['uid'] = res
                             matches = True
                         else:
                             continue
 
-                    if a.product_code or a.name or a.strict_name or a.publisher:
-                        continue  # not relevant to a ticket
+                    if a.product_code:
+                        res = check_ncch(file_header, a.product_code, 'pcode')
+                        if res:
+                            result['pcode'] = res
+                            matches = True
+                        else:
+                            continue
 
-                elif cert_name.startswith(b'CP'):  # tmd
-                    matches = check_type('tmd')
+                    if is_ncch_encrypted or is_ncch_zerokey_encrypted:
+                        if encryption_supported:
+                            print_v('Not searching {} any further due to NCCH crypto not being implemented.'.format(filename))
+                            if a.name or a.strict_name or a.publisher:
+                                continue
+                        else:
+                            print_v('Not searching {} any further due to no encryption support.'.format(filename))
+                            continue
+
+                elif file_header[0:4] == b'NCSD':
+                    matches = check_type('cci')
                     if not matches:
+                        break
+                    # special check to make sure it's not a nand backup
+                    if file_header[0xC:0x10] != b'\0\0\4\0':
                         continue
-                    f.seek(0x1DE)
-                    content_count = int.from_bytes(f.read(2), 'big')
-                    f.seek(0)
-                    tmd = f.read(0xB04 + (0x30 * content_count))
-                    # tid check, to make sure it's 3DS and not other systems
-                    if tmd[0x18C:0x18E] != b'\0\4':
-                        continue
-                    if cert_name == b'CP0000000b':
-                        result['type'] = 'TMD'
-                    elif cert_name == b'CP0000000a':
-                        result['type'] = 'TMD (dev)'
-                    else:
-                        print_v('Ticket certificate unknown! Found {}. This shouldn\'t be happening. Is this a valid 3DS tmd?'.format(cert_name))
-                        continue
+                    result['type'] = 'CCI'
+
+                    # the ncch offset is assumed to be 0x4000 since every cci ever
+                    #   has it start here. i'm also being lazy. maybe i'll
+                    #   properly implement offset reading later.
+                    f.seek(0x4000)
+                    ncch_key_y = f.read(0x10)
+                    f.seek(0xF0, 1)
+                    ncch_header = f.read(0x100)
+
+                    ncch_flag_5 = ncch_header[0x8D]  # content type
+                    ncch_flag_7 = ncch_header[0x8F]  # bit-masks (for crypto)
+                    is_ncch_encrypted = not ncch_flag_7 & 4
+                    is_ncch_zerokey_encrypted = ncch_flag_7 & 1
 
                     if a.title_id:
-                        # read tid from tmd
-                        res = check_tmd(tmd, a.title_id, 'tid')
+                        # read tid from ncsd header
+                        res = check_ncch(ncch_header, a.title_id, 'tid')
                         if res:
                             result['tid'] = res
                             matches = True
@@ -536,20 +443,124 @@ for filename in big_list_of_files:
                             continue
 
                     if a.unique_id:
-                        # read uid from tmd
-                        res = check_tmd(tmd, a.unique_id, 'uid')
+                        res = check_ncch(ncch_header, a.unique_id, 'uid')
                         if res:
                             result['uid'] = res
                             matches = True
                         else:
                             continue
 
-                    if a.product_code or a.name or a.strict_name or a.publisher:
-                        continue  # not relevant to a tmd
+                    if a.product_code:
+                        res = check_ncch(ncch_header, a.product_code, 'pcode')
+                        if res:
+                            result['pcode'] = res
+                            matches = True
+                        else:
+                            continue
 
-        # if still matches (mostly a failsafe), add it to the search results
-        if matches:
-            search_results[filename] = result
+                    if is_ncch_encrypted or is_ncch_zerokey_encrypted:
+                        if encryption_supported:
+                            print_v('Not searching {} any further due to NCCH crypto not being implemented.'.format(filename))
+                            if a.name or a.strict_name or a.publisher:
+                                continue
+                        else:
+                            print_v('Not searching {} any further due to no encryption support.'.format(filename))
+                            continue
+
+                else:
+                    # not ncch/ncsd
+                    # check to see if it's a ticket or tmd
+                    f.seek(0x150)
+                    cert_name = f.read(0xA)
+                    if cert_name.startswith(b'XS'):  # ticket
+                        matches = check_type('tik')
+                        if not matches:
+                            continue
+                        f.seek(0)
+                        ticket = f.read(0x350)
+                        # tid check, to make sure it's 3DS and not other systems
+                        if ticket[0x1DC:0x1DE] != b'\0\4':
+                            continue
+                        if cert_name == b'XS0000000c':
+                            result['type'] = 'TIK'
+                        elif cert_name == b'XS00000009':
+                            result['type'] = 'TIK (dev)'
+                        else:
+                            print_v('Ticket certificate unknown! Found {}. This shouldn\'t be happening. Is this a valid 3DS ticket?'.format(cert_name))
+                            continue
+
+                        if a.title_id:
+                            # read tid from ticket
+                            res = check_ticket(ticket, a.title_id, 'tid')
+                            if res:
+                                result['tid'] = res
+                                matches = True
+                            else:
+                                continue
+
+                        if a.unique_id:
+                            # read uid from ticket
+                            res = check_ticket(ticket, a.unique_id, 'uid')
+                            if res:
+                                result['uid'] = res
+                                matches = True
+                            else:
+                                continue
+
+                        if a.product_code or a.name or a.strict_name or a.publisher:
+                            continue  # not relevant to a ticket
+
+                    elif cert_name.startswith(b'CP'):  # tmd
+                        matches = check_type('tmd')
+                        if not matches:
+                            continue
+                        f.seek(0x1DE)
+                        content_count = int.from_bytes(f.read(2), 'big')
+                        f.seek(0)
+                        tmd = f.read(0xB04 + (0x30 * content_count))
+                        # tid check, to make sure it's 3DS and not other systems
+                        if tmd[0x18C:0x18E] != b'\0\4':
+                            continue
+                        if cert_name == b'CP0000000b':
+                            result['type'] = 'TMD'
+                        elif cert_name == b'CP0000000a':
+                            result['type'] = 'TMD (dev)'
+                        else:
+                            print_v('Ticket certificate unknown! Found {}. This shouldn\'t be happening. Is this a valid 3DS tmd?'.format(cert_name))
+                            continue
+
+                        if a.title_id:
+                            # read tid from tmd
+                            res = check_tmd(tmd, a.title_id, 'tid')
+                            if res:
+                                result['tid'] = res
+                                matches = True
+                            else:
+                                continue
+
+                        if a.unique_id:
+                            # read uid from tmd
+                            res = check_tmd(tmd, a.unique_id, 'uid')
+                            if res:
+                                result['uid'] = res
+                                matches = True
+                            else:
+                                continue
+
+                        if a.product_code or a.name or a.strict_name or a.publisher:
+                            continue  # not relevant to a tmd
+
+            # if still matches (mostly a failsafe), add it to the search results
+            if matches:
+                search_results[filename] = result
+
+    except Exception as e:
+        print('Exception occured when searching {}'.format(filename))
+        if a.err:
+            traceback.print_exception(type(e), e, e.__traceback__)
+        else:
+            print('  {}: {}'.format(type(e).__name__, e))
+
 
 column_lengths = []
 lines = []
