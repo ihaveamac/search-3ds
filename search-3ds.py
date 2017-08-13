@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import os
 import struct
 import sys
 import traceback
+import unicodedata
 from collections import OrderedDict
 from pathlib import Path
 
@@ -31,6 +33,7 @@ terms.add_argument('--publisher', '-P', metavar='NAME', help='publisher name (in
 terms.add_argument('--title-id', '-i', metavar='TID', help='title id (e.g. 0004000000046500)')
 terms.add_argument('--unique-id', '-u', metavar='UID', help='unique id in hex (e.g. 175e or 0x175e)')
 terms.add_argument('--product-code', '-p', metavar='CODE', help='product code (e.g. CTR-P-AQNE) - entire product code not required')
+terms.add_argument('--exh-name', '-e', metavar='TITLE', help='extended header (exheader) application title - entire name not required (NYI)')
 
 a = parser.parse_args()
 
@@ -42,7 +45,7 @@ def print_v(msg, v=1):
 
 # if you know of a better way to check if at least one of the terms was used,
 #   let me know please
-if not (a.type or a.name or a.strict_name or a.publisher or a.title_id or a.unique_id or a.product_code):
+if not (a.type or a.name or a.strict_name or a.publisher or a.title_id or a.unique_id or a.product_code or a.exh_name):
     parser.print_usage()
     sys.exit(1)
 
@@ -58,6 +61,7 @@ common_keys = (
     ('7ADA22CAFFC476CC8297A0C7CEEEEEBE', 'E02D27441DB9558BAD087FD746DF1057'),
     ('A5051CA1B37DCF3AFBCF8CC1EDD9CE02', '0412959405AA41CC7118B61E75E283AB')
 )
+zerokey = b'\0' * 16
 
 big_list_of_files = []
 
@@ -130,8 +134,8 @@ def rol(val, r_bits, max_bits):
     return (val << r_bits % max_bits) & (2 ** max_bits - 1) | ((val & (2 ** max_bits - 1)) >> (max_bits - (r_bits % max_bits)))
 
 
-def ncch_keygen(key_y, isdev):
-    x = int(orig_ncch_key_x[isdev], 16)
+def ncch_keygen(key_y, is_dev):
+    x = int(orig_ncch_key_x[is_dev], 16)
     y = int.from_bytes(key_y, 'big')
     return rol((rol(x, 2, 128) ^ y) + 0x1FF9E9AAC5FE0408024591DC5D52768A, 87, 128).to_bytes(0x10, byteorder='big')
 
@@ -226,9 +230,31 @@ def check_ncsd(ncsd, content, cktype):
         if any(bytes.fromhex(c) == tid for c in contents):
             return tid.hex()
         return False
+    return False
 
 
-lang_codes = ('JA', 'EN', 'FR', 'DE', 'IT', 'ES', 'ZH-S', 'KO', 'NL', 'PT', 'RU', 'ZH-T')
+def check_exh(exh, content, cktype):
+    appname = exh[0:8].decode('utf-8').rstrip('\0')
+    if content == '.show':
+        if cktype == 'appname':
+            return appname
+        return False
+
+    contents = content.split(',')
+    if cktype == 'appname':
+        if any(c.lower() in appname.lower() for c in contents):
+            return appname
+        return False
+    return False
+
+
+lang_codes = ('JA', 'EN', 'FR', 'DE', 'IT', 'ES', 'ZH-S', 'KO', 'NL', 'PT', 'RU', 'ZH-T', 'unk1', 'unk2', 'unk3', 'unk4')
+
+
+def normalize_name(name, lang):
+    if not any(l in lang for l in ('JA', 'ZH', 'KO', 'RU', 'unk')):
+        name = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode('utf-8')
+    return name
 
 
 def check_smdh(smdh, content, cktype):
@@ -242,13 +268,77 @@ def check_smdh(smdh, content, cktype):
                 'long_name': st[0x80:0x180].decode('utf-16le').rstrip('\0'),
                 'publisher': st[0x180:0x200].decode('utf-16le').rstrip('\0')
             }
-    print_v(title_structs)
-    return False  # TODO: proper smdh searching
+
+    contents = content.split(',')
+    found_lang = False
+    for c in contents:
+        if any(c.lower().startswith(l.lower()) for l in lang_codes):
+            c_lang, c_name = c.split(':', 1)
+            c_lang = c_lang.upper()
+            if c_lang in title_structs:
+                if c_name == '.show':
+                    found_lang = c_lang
+                    break
+                if cktype == 'name':
+                    n_name = normalize_name(title_structs[c_lang]['short_name'], c_lang)
+                    n_long_name = normalize_name(title_structs[c_lang]['long_name'], c_lang)
+                    c_n_name = normalize_name(c_name, c_lang)
+                    if c_n_name.lower() in n_name.lower() or c_n_name.lower() in n_long_name.lower():
+                        found_lang = c_lang
+                        break
+                elif cktype == 'strict_name':
+                    if c_name in title_structs[c_lang]['short_name'] or c_name in title_structs[c_lang]['long_name']:
+                        found_lang = c_lang
+                        break
+                elif cktype == 'publisher':
+                    n_publisher = normalize_name(title_structs[c_lang]['publisher'], c_lang)
+                    c_n_name = normalize_name(c_name, c_lang)
+                    if c_n_name in n_publisher:
+                        found_lang = c_lang
+                        break
+                else:
+                    return False
+        else:
+            if c == '.show':
+                if 'EN' in title_structs:
+                    found_lang = 'EN'
+                    break
+                else:
+                    for l in lang_codes:
+                        if l in title_structs:
+                            found_lang = l
+                            break
+            for lang, name in title_structs.items():
+                if cktype == 'name':
+                    n_name = normalize_name(name['short_name'], lang)
+                    n_long_name = normalize_name(name['long_name'], lang)
+                    c_n_name = normalize_name(c, lang)
+                    if c_n_name.lower() in n_name.lower() or c_n_name.lower() in n_long_name.lower():
+                        found_lang = lang
+                        break
+                elif cktype == 'strict_name':
+                    if c in name['short_name'] or c in name['long_name']:
+                        found_lang = lang
+                        break
+                elif cktype == 'publisher':
+                    n_publisher = normalize_name(name['publisher'], lang)
+                    c_n_name = normalize_name(c, lang)
+                    if c_n_name in n_publisher:
+                        found_lang = lang
+                        break
+                else:
+                    return False
+
+    if found_lang:
+        return (found_lang, title_structs[found_lang])
+    return False
 
 
 search_results = OrderedDict()
 
 for filename in big_list_of_files:
+    read_smdh = a.name or a.strict_name or a.publisher
+    read_exh = a.exh_name
     try:
         with open(filename, 'rb') as f:
             print_v('Searching {} for matches'.format(filename), v=2)
@@ -276,6 +366,7 @@ for filename in big_list_of_files:
                 ticket = f.read(0x350)
                 # no need to do a tid check here, if it's in a cia it's probably
                 #   for 3DS
+                tid = ticket[0x1DC:0x1E4]
 
                 # get signer (determines retail/dev)
                 ticket_cert_name = ticket[0x150:0x15A]
@@ -309,20 +400,21 @@ for filename in big_list_of_files:
                 # this is very lazy, but given fixed offsets this should not change
                 f.seek(0x38CA)
                 content_type = int.from_bytes(f.read(0x2), 'big')
-                is_encrypted = content_type & 1
+                is_cia_encrypted = content_type & 1
 
-                if is_encrypted:
+                if is_cia_encrypted:
                     if encryption_supported:
                         # get encrypted titlekey
                         enc_titlekey = ticket[0x1BF:0x1CF]
                         # get common key index
                         common_key_index = ticket[0x1F1]
                         # decrypt titlekey
-                        cipher_titlekey = AES.new(bytes.fromhex(common_keys[common_key_index][is_dev]), AES.MODE_CBC, ticket[0x1DC:0x1E4] + (b'\0' * 8))
+                        cipher_titlekey = AES.new(bytes.fromhex(common_keys[common_key_index][is_dev]), AES.MODE_CBC, tid + (b'\0' * 8))
                         dec_titlekey = cipher_titlekey.decrypt(enc_titlekey)
                         f.seek(content_offset)
                         cipher_content0 = AES.new(dec_titlekey, AES.MODE_CBC, b'\0' * 0x10)
-                        ncch_header_pre = cipher_content0.decrypt(f.read(0x200))
+                        ncch_header_enc = f.read(0x200)
+                        ncch_header_pre = cipher_content0.decrypt(ncch_header_enc)
                         ncch_key_y = ncch_header_pre[0:0x10]
                         ncch_header = ncch_header_pre[0x100:0x200]
                     else:
@@ -350,14 +442,145 @@ for filename in big_list_of_files:
                     else:
                         continue
 
-                if is_ncch_encrypted or is_ncch_zerokey_encrypted:
-                    if encryption_supported:
-                        print_v('Not searching {} any further due to NCCH crypto not being implemented.'.format(filename))
-                        if a.name or a.strict_name or a.publisher:
+                # this is hell
+                if read_exh or read_smdh:
+                    exefs_offset = int.from_bytes(ncch_header[0xA0:0xA4], 'little') * 0x200
+                    ctr_exh_value = int.from_bytes(tid + b'\1' + (b'\0' * 7), 'big')
+                    ctr_exefs_value = int.from_bytes(tid + b'\2' + (b'\0' * 7), 'big')
+                    if is_ncch_encrypted:
+                        if encryption_supported:
+                            ncch_key = zerokey if is_ncch_zerokey_encrypted else ncch_keygen(ncch_key_y, is_dev)
+                            if is_cia_encrypted:
+                                if read_exh:
+                                    if ncch_flag_5 & 2:
+                                        cia_exh_iv = ncch_header_enc[0x1F0:0x200]
+                                        cipher_cia_exh = AES.new(dec_titlekey, AES.MODE_CBC, cia_exh_iv)
+                                        f.seek(content_offset + 0x200)
+                                        exh_cia_enc = f.read(0x400)  # not the full exheader, just enough for hashing
+                                        exh = cipher_cia_exh.decrypt(exh_cia_enc)
+                                    else:
+                                        continue  # cfa does not have exheader
+                                if read_smdh:
+                                    if exefs_offset != 0:
+                                        f.seek(content_offset + exefs_offset - 0x10)
+                                        cia_exefs_iv = f.read(0x10)
+                                        cipher_cia_exefs = AES.new(dec_titlekey, AES.MODE_CBC, cia_exefs_iv)
+                                        exefs_cia_enc = f.read(0x200)
+                                        exefs_header = cipher_cia_exefs.decrypt(exefs_cia_enc)
+                                    else:
+                                        continue  # no exefs, no smdh
+                            else:
+                                if read_exh:
+                                    if ncch_flag_5 & 2:
+                                        f.seek(content_offset + 0x200)
+                                        exh = f.read(0x400)
+                                    else:
+                                        continue  # cfa does not have exheader
+                                if read_smdh:
+                                    if exefs_offset != 0:
+                                        f.seek(content_offset + exefs_offset)
+                                        exefs_header = f.read(0x200)
+                                    else:
+                                        continue  # no exefs, no smdh
+                            if read_exh:
+                                ctr_exh = Counter.new(128, initial_value=ctr_exh_value)
+                                cipher_exh = AES.new(ncch_key, AES.MODE_CTR, counter=ctr_exh)
+                                exh = cipher_exh.decrypt(exh)
+                            if read_smdh:
+                                ctr_exefs = Counter.new(128, initial_value=ctr_exefs_value)
+                                cipher_exefs = AES.new(ncch_key, AES.MODE_CTR, counter=ctr_exefs)
+                                exefs_header = cipher_exefs.decrypt(exefs_header)
+                        else:
+                            print_v('Not searching {} any further due to no encryption support.'.format(filename))
                             continue
                     else:
-                        print_v('Not searching {} any further due to no encryption support.'.format(filename))
-                        continue
+                        if read_exh:
+                            if ncch_flag_5 & 2:
+                                if is_cia_encrypted:
+                                    # not tested
+                                    cia_exh_iv = ncch_header_enc[0x1F0:0x200]
+                                    cipher_cia_exh = AES.new(dec_titlekey, AES.MODE_CBC, cia_exh_iv)
+                                    f.seek(content_offset + 0x200)
+                                    exh_cia_enc = f.read(0x400)  # not the full exheader, just enough for hashing
+                                    exh = cipher_cia_exh.decrypt(exh_cia_enc)
+                                else:
+                                    f.seek(content_offset + 0x200)
+                                    exh = f.read(0x400)
+                            else:
+                                continue  # cfa does not have exheader
+                        if read_smdh:
+                            if exefs_offset != 0:
+                                if is_cia_encrypted:
+                                    # not tested
+                                    f.seek(content_offset + exefs_offset - 0x10)
+                                    cia_exefs_iv = f.read(0x10)
+                                    cipher_cia_exefs = AES.new(dec_titlekey, AES.MODE_CBC, cia_exefs_iv)
+                                    exefs_cia_enc = f.read(0x200)
+                                    exefs_header = cipher_cia_exefs.decrypt(exefs_cia_enc)
+                                else:
+                                    f.seek(content_offset + exefs_offset)
+                                    exefs_header = f.read(0x200)
+                            else:
+                                continue  # no exefs, no smdh
+
+                    # get icon
+                    if read_smdh:
+                        exefs_files = [exefs_header[i:i + 0x10] for i in range(0, 0xA0, 0x10)]
+                        icon_offset = 0
+                        for en in exefs_files:
+                            if en[0:8].rstrip(b'\0') == b'icon':
+                                icon_offset = int.from_bytes(en[8:12], 'little') + 0x200
+                                break
+                        if icon_offset:
+                            if is_cia_encrypted:
+                                f.seek(content_offset + exefs_offset + icon_offset - 0x10)
+                                cia_exefs_icon_iv = f.read(0x10)
+                                cipher_cia_exefs_icon = AES.new(dec_titlekey, AES.MODE_CBC, cia_exefs_icon_iv)
+                                exefs_icon_enc_cia = f.read(0x36C0)
+                                icon = cipher_cia_exefs_icon.decrypt(exefs_icon_enc_cia)
+                            else:
+                                f.seek(content_offset + exefs_offset + icon_offset)
+                                icon = f.read(0x36C0)
+                            if is_ncch_encrypted:
+                                ctr_exefs_icon = Counter.new(128, initial_value=ctr_exefs_value + (icon_offset >> 4))
+                                cipher_exefs_icon = AES.new(ncch_key, AES.MODE_CTR, counter=ctr_exefs_icon)
+                                icon = cipher_exefs_icon.decrypt(icon)
+
+                            if a.name:
+                                res = check_smdh(icon, a.name, 'name')
+                                if res:
+                                    result['name'] = res
+                                    matches = True
+                                else:
+                                    continue
+
+                            if a.strict_name:
+                                res = check_smdh(icon, a.strict_name, 'strict_name')
+                                if res:
+                                    result['name'] = res
+                                    matches = True
+                                else:
+                                    continue
+
+                            if a.publisher:
+                                res = check_smdh(icon, a.publisher, 'publisher')
+                                if res:
+                                    result['publisher'] = res
+                                    matches = True
+                                else:
+                                    continue
+
+                        else:
+                            print_v('Failed to find icon in exefs in {}'.format(filename))
+                            continue
+
+                    if read_exh:
+                        res = check_exh(exh, a.exh_name, 'appname')
+                        if res:
+                            result['appname'] = res
+                            matches = True
+                        else:
+                            continue
 
             else:
                 f.seek(0)
@@ -366,6 +589,7 @@ for filename in big_list_of_files:
                 # check for ncch/ncsd header
                 f.seek(0xF0, 1)
                 file_header = f.read(0x100)
+                tid = file_header[0x8:0x10][::-1]
                 if file_header[0:4] == b'NCCH':
                     matches = check_type('ncch')
                     if not matches:
@@ -402,14 +626,126 @@ for filename in big_list_of_files:
                         else:
                             continue
 
-                    if is_ncch_encrypted or is_ncch_zerokey_encrypted:
-                        if encryption_supported:
-                            print_v('Not searching {} any further due to NCCH crypto not being implemented.'.format(filename))
-                            if a.name or a.strict_name or a.publisher:
+                    if read_exh or read_smdh:
+                        exefs_offset = int.from_bytes(file_header[0xA0:0xA4], 'little') * 0x200
+                        ctr_exh_value = int.from_bytes(tid + b'\1' + (b'\0' * 7), 'big')
+                        ctr_exefs_value = int.from_bytes(tid + b'\2' + (b'\0' * 7), 'big')
+                        if is_ncch_encrypted:
+                            uses_dev = None
+                            if encryption_supported:
+                                # test retail, then dev if fail
+                                ncch_key = zerokey if is_ncch_zerokey_encrypted else ncch_keygen(ncch_key_y, 0)
+                                if not is_ncch_zerokey_encrypted:
+                                    ncch_key_dev = ncch_keygen(ncch_key_y, 1)
+                                if read_exh:
+                                    if ncch_flag_5 & 2:
+                                        f.seek(0x200)
+                                        exh_enc = f.read(0x400)
+                                        ctr_exh = Counter.new(128, initial_value=ctr_exh_value)
+                                        cipher_exh = AES.new(ncch_key, AES.MODE_CTR, counter=ctr_exh)
+                                        exh = cipher_exh.decrypt(exh_enc)
+                                        exh_hash = hashlib.sha256(exh).digest()
+                                        if exh_hash != file_header[0x60:0x80]:
+                                            uses_dev = True
+                                            cipher_exh = AES.new(ncch_key_dev, AES.MODE_CTR, counter=ctr_exh)
+                                            exh = cipher_exh.decrypt(exh_enc)
+                                            exh_hash = hashlib.sha256(exh).digest()
+                                            if exh_hash != file_header[0x60:0x80]:
+                                                print_v('ExHeader hash check fail for {}'.format(filename))
+                                                continue
+                                    else:
+                                        continue  # cfa does not have exheader
+                                if read_smdh:
+                                    if exefs_offset != 0:
+                                        f.seek(exefs_offset)
+                                        exefs_enc = f.read(0x200)
+                                        ctr_exefs = Counter.new(128, initial_value=ctr_exefs_value)
+                                        if uses_dev is None:
+                                            cipher_exefs = AES.new(ncch_key, AES.MODE_CTR, counter=ctr_exefs)
+                                            exefs_header = cipher_exefs.decrypt(exefs_enc)
+                                            exefs_hash = hashlib.sha256(exefs_header).digest()
+                                            if exefs_hash != file_header[0xC0:0xE0]:
+                                                uses_dev = True
+                                                cipher_exefs = AES.new(ncch_key_dev, AES.MODE_CTR, counter=ctr_exefs)
+                                                exefs_header = cipher_exefs.decrypt(exefs_enc)
+                                                exefs_hash = hashlib.sha256(exefs_header).digest()
+                                                if exefs_hash != file_header[0xC0:0xE0]:
+                                                    print_v('ExeFS header hash check fail for {}'.format(filename))
+                                                    continue
+                                        else:
+                                            cipher_exefs = AES.new(ncch_key_dev if uses_dev else ncch_key, AES.MODE_CTR, counter=ctr_exefs)
+                                            exefs_header = cipher_exefs.decrypt(exefs_enc)
+                                            exefs_hash = hashlib.sha256(exefs_header).digest()
+                                            if exefs_hash != file_header[0xC0:0xE0]:
+                                                print_v('ExeFS header hash check fail for {}'.format(filename))
+                                                continue
+                                    else:
+                                        continue  # no exefs, no smdh
+                            else:
+                                print_v('Not searching {} any further due to no encryption support.'.format(filename))
                                 continue
+
                         else:
-                            print_v('Not searching {} any further due to no encryption support.'.format(filename))
-                            continue
+                            if read_exh:
+                                if ncch_flag_5 & 2:
+                                    f.seek(0x200)
+                                    exh = f.read(0x400)
+                                else:
+                                    continue  # cfa does not have exheader
+                            if read_smdh:
+                                if exefs_offset != 0:
+                                    f.seek(exefs_offset)
+                                    exefs_header = f.read(0x200)
+                                else:
+                                    continue  # no exefs, no smdh
+
+                        # get icon
+                        if read_smdh:
+                            exefs_files = [exefs_header[i:i + 0x10] for i in range(0, 0xA0, 0x10)]
+                            icon_offset = 0
+                            for en in exefs_files:
+                                if en[0:8].rstrip(b'\0') == b'icon':
+                                    icon_offset = int.from_bytes(en[8:12], 'little') + 0x200
+                                    break
+                            if icon_offset:
+                                f.seek(exefs_offset + icon_offset)
+                                icon = f.read(0x36C0)
+                                if is_ncch_encrypted:
+                                    ctr_exefs_icon = Counter.new(128, initial_value=ctr_exefs_value + (icon_offset >> 4))
+                                    cipher_exefs_icon = AES.new(ncch_key_dev if uses_dev else ncch_key, AES.MODE_CTR, counter=ctr_exefs_icon)
+                                    icon = cipher_exefs_icon.decrypt(icon)
+
+                                if a.name:
+                                    res = check_smdh(icon, a.name, 'name')
+                                    if res:
+                                        result['name'] = res
+                                        matches = True
+                                    else:
+                                        continue
+
+                                if a.strict_name:
+                                    res = check_smdh(icon, a.strict_name, 'strict_name')
+                                    if res:
+                                        result['name'] = res
+                                        matches = True
+                                    else:
+                                        continue
+
+                                if a.publisher:
+                                    res = check_smdh(icon, a.publisher, 'publisher')
+                                    if res:
+                                        result['publisher'] = res
+                                        matches = True
+                                    else:
+                                        continue
+
+                        if read_exh:
+                            res = check_exh(exh, a.exh_name, 'appname')
+                            if res:
+                                result['appname'] = res
+                                matches = True
+                            else:
+                                continue
 
                 elif file_header[0:4] == b'NCSD':
                     matches = check_type('cci')
@@ -458,14 +794,126 @@ for filename in big_list_of_files:
                         else:
                             continue
 
-                    if is_ncch_encrypted or is_ncch_zerokey_encrypted:
-                        if encryption_supported:
-                            print_v('Not searching {} any further due to NCCH crypto not being implemented.'.format(filename))
-                            if a.name or a.strict_name or a.publisher:
+                    if read_exh or read_smdh:
+                        exefs_offset = int.from_bytes(ncch_header[0xA0:0xA4], 'little') * 0x200
+                        ctr_exh_value = int.from_bytes(tid + b'\1' + (b'\0' * 7), 'big')
+                        ctr_exefs_value = int.from_bytes(tid + b'\2' + (b'\0' * 7), 'big')
+                        if is_ncch_encrypted:
+                            uses_dev = None
+                            if encryption_supported:
+                                # test retail, then dev if fail
+                                ncch_key = zerokey if is_ncch_zerokey_encrypted else ncch_keygen(ncch_key_y, 0)
+                                if not is_ncch_zerokey_encrypted:
+                                    ncch_key_dev = ncch_keygen(ncch_key_y, 1)
+                                if read_exh:
+                                    if ncch_flag_5 & 2:
+                                        f.seek(0x4200)
+                                        exh_enc = f.read(0x400)
+                                        ctr_exh = Counter.new(128, initial_value=ctr_exh_value)
+                                        cipher_exh = AES.new(ncch_key, AES.MODE_CTR, counter=ctr_exh)
+                                        exh = cipher_exh.decrypt(exh_enc)
+                                        exh_hash = hashlib.sha256(exh).digest()
+                                        if exh_hash != ncch_header[0x60:0x80]:
+                                            uses_dev = True
+                                            cipher_exh = AES.new(ncch_key_dev, AES.MODE_CTR, counter=ctr_exh)
+                                            exh = cipher_exh.decrypt(exh_enc)
+                                            exh_hash = hashlib.sha256(exh).digest()
+                                            if exh_hash != ncch_header[0x60:0x80]:
+                                                print_v('ExHeader hash check fail for {}'.format(filename))
+                                                continue
+                                    else:
+                                        continue  # cfa does not have exheader
+                                if read_smdh:
+                                    if exefs_offset != 0:
+                                        f.seek(0x4000 + exefs_offset)
+                                        exefs_enc = f.read(0x200)
+                                        ctr_exefs = Counter.new(128, initial_value=ctr_exefs_value)
+                                        if uses_dev is None:
+                                            cipher_exefs = AES.new(ncch_key, AES.MODE_CTR, counter=ctr_exefs)
+                                            exefs_header = cipher_exefs.decrypt(exefs_enc)
+                                            exefs_hash = hashlib.sha256(exefs_header).digest()
+                                            if exefs_hash != ncch_header[0xC0:0xE0]:
+                                                uses_dev = True
+                                                cipher_exefs = AES.new(ncch_key_dev, AES.MODE_CTR, counter=ctr_exefs)
+                                                exefs_header = cipher_exefs.decrypt(exefs_enc)
+                                                exefs_hash = hashlib.sha256(exefs_header).digest()
+                                                if exefs_hash != ncch_header[0xC0:0xE0]:
+                                                    print_v('ExeFS header hash check fail for {}'.format(filename))
+                                                    continue
+                                        else:
+                                            cipher_exefs = AES.new(ncch_key_dev if uses_dev else ncch_key, AES.MODE_CTR, counter=ctr_exefs)
+                                            exefs_header = cipher_exefs.decrypt(exefs_enc)
+                                            exefs_hash = hashlib.sha256(exefs_header).digest()
+                                            if exefs_hash != ncch_header[0xC0:0xE0]:
+                                                print_v('ExeFS header hash check fail for {}'.format(filename))
+                                                continue
+                                    else:
+                                        continue  # no exefs, no smdh
+                            else:
+                                print_v('Not searching {} any further due to no encryption support.'.format(filename))
                                 continue
+
                         else:
-                            print_v('Not searching {} any further due to no encryption support.'.format(filename))
-                            continue
+                            if read_exh:
+                                if ncch_flag_5 & 2:
+                                    f.seek(0x4200)
+                                    exh = f.read(0x400)
+                                else:
+                                    continue  # cfa does not have exheader
+                            if read_smdh:
+                                if exefs_offset != 0:
+                                    f.seek(0x4000 + exefs_offset)
+                                    exefs_header = f.read(0x200)
+                                else:
+                                    continue  # no exefs, no smdh
+
+                        # get icon
+                        if read_smdh:
+                            exefs_files = [exefs_header[i:i + 0x10] for i in range(0, 0xA0, 0x10)]
+                            icon_offset = 0
+                            for en in exefs_files:
+                                if en[0:8].rstrip(b'\0') == b'icon':
+                                    icon_offset = int.from_bytes(en[8:12], 'little') + 0x200
+                                    break
+                            if icon_offset:
+                                f.seek(0x4000 + exefs_offset + icon_offset)
+                                icon = f.read(0x36C0)
+                                if is_ncch_encrypted:
+                                    ctr_exefs_icon = Counter.new(128, initial_value=ctr_exefs_value + (icon_offset >> 4))
+                                    cipher_exefs_icon = AES.new(ncch_key_dev if uses_dev else ncch_key, AES.MODE_CTR, counter=ctr_exefs_icon)
+                                    icon = cipher_exefs_icon.decrypt(icon)
+
+                                if a.name:
+                                    res = check_smdh(icon, a.name, 'name')
+                                    if res:
+                                        result['name'] = res
+                                        matches = True
+                                    else:
+                                        continue
+
+                                if a.strict_name:
+                                    res = check_smdh(icon, a.strict_name, 'strict_name')
+                                    if res:
+                                        result['name'] = res
+                                        matches = True
+                                    else:
+                                        continue
+
+                                if a.publisher:
+                                    res = check_smdh(icon, a.publisher, 'publisher')
+                                    if res:
+                                        result['publisher'] = res
+                                        matches = True
+                                    else:
+                                        continue
+
+                        if read_exh:
+                            res = check_exh(exh, a.exh_name, 'appname')
+                            if res:
+                                result['appname'] = res
+                                matches = True
+                            else:
+                                continue
 
                 else:
                     # not ncch/ncsd
@@ -507,7 +955,7 @@ for filename in big_list_of_files:
                             else:
                                 continue
 
-                        if a.product_code or a.name or a.strict_name or a.publisher:
+                        if a.product_code or read_exh or read_smdh:
                             continue  # not relevant to a ticket
 
                     elif cert_name.startswith(b'CP'):  # tmd
@@ -547,7 +995,7 @@ for filename in big_list_of_files:
                             else:
                                 continue
 
-                        if a.product_code or a.name or a.strict_name or a.publisher:
+                        if a.product_code or read_exh or read_smdh:
                             continue  # not relevant to a tmd
 
             # if still matches (mostly a failsafe), add it to the search results
@@ -582,6 +1030,13 @@ if search_results:
         header.append('Unique ID')
     if a.product_code:
         header.append('Product Code')
+    if a.name or a.strict_name:
+        header.append('Short Name')
+        header.append('Long Name')
+    if a.publisher:
+        header.append('Publisher')
+    if a.exh_name:
+        header.append('ExH Name')
     if not a.no_format:
         column_lengths = [0] * len(header)
         add_to_table(header)
@@ -594,6 +1049,13 @@ if search_results:
             line.append(result['uid'])
         if 'pcode' in result:
             line.append(result['pcode'])
+        if 'name' in result:
+            line.append('{}: {}'.format(result['name'][0], result['name'][1]['short_name']))
+            line.append('{}: {}'.format(result['name'][0], result['name'][1]['long_name']))
+        if 'publisher' in result:
+            line.append('{}: {}'.format(result['publisher'][0], result['publisher'][1]['publisher']))
+        if 'appname' in result:
+            line.append(result['appname'])
         add_to_table(line)
 
     for line_idx, line in enumerate(lines):
