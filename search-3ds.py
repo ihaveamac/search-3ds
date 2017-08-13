@@ -27,13 +27,13 @@ parser.add_argument('--err', help='dump traceback when an exception occurs', act
 
 terms = parser.add_argument_group('terms')
 terms.add_argument('--type', '-t', metavar='TYPE', help='file types to search, separated by commas')
-terms.add_argument('--name', '-n', metavar='NAME', help='title name (in smdh, displays on HOME Menu) - entire name not required (NYI)')
-terms.add_argument('--strict-name', '-N', metavar='NAME', help='more-strict title name (in smdh, displays on HOME Menu) - entire name not required (NYI)')
-terms.add_argument('--publisher', '-P', metavar='NAME', help='publisher name (in smdh, displays on HOME Menu) - entire name not required (NYI)')
+terms.add_argument('--name', '-n', metavar='NAME', help='title name (in smdh, displays on HOME Menu) - entire name not required')
+terms.add_argument('--strict-name', '-N', metavar='NAME', help='more-strict title name (in smdh, displays on HOME Menu) - entire name not required')
+terms.add_argument('--publisher', '-P', metavar='NAME', help='publisher name (in smdh, displays on HOME Menu) - entire name not required')
 terms.add_argument('--title-id', '-i', metavar='TID', help='title id (e.g. 0004000000046500)')
 terms.add_argument('--unique-id', '-u', metavar='UID', help='unique id in hex (e.g. 175e or 0x175e)')
 terms.add_argument('--product-code', '-p', metavar='CODE', help='product code (e.g. CTR-P-AQNE) - entire product code not required')
-terms.add_argument('--exh-name', '-e', metavar='TITLE', help='extended header (exheader) application title - entire name not required (NYI)')
+terms.add_argument('--exh-name', '-e', metavar='TITLE', help='extended header (exheader) application title - entire name not required')
 
 a = parser.parse_args()
 
