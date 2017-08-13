@@ -681,6 +681,8 @@ for filename in big_list_of_files:
                                                 continue
                                     else:
                                         continue  # no exefs, no smdh
+                                if uses_dev is True:
+                                    result['type'] += ' (dev)'
                             else:
                                 print_v('Not searching {} any further due to no encryption support.'.format(filename))
                                 continue
@@ -849,6 +851,8 @@ for filename in big_list_of_files:
                                                 continue
                                     else:
                                         continue  # no exefs, no smdh
+                                if uses_dev is True:
+                                    result['type'] += ' (dev)'
                             else:
                                 print_v('Not searching {} any further due to no encryption support.'.format(filename))
                                 continue
